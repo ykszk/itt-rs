@@ -8,8 +8,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "3", features = ["derive"] }
 rocket = "0.5.0-rc.2"
-rocket_dyn_templates = { version = "0.1.0-rc.2", features = ["tera"]}
 webbrowser = "0"
 tera = { version = "1", default-features = false }
-# include_dir = "0"
 lazy_static = "1.4.0"
+regex = "1"
