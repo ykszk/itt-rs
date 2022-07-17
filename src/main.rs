@@ -1,22 +1,25 @@
-#[macro_use]
-extern crate rocket;
 use clap::Parser;
 use rocket::figment::{
     providers::{Format, Toml},
     Figment,
 };
-use rocket::response::content::{self, RawHtml};
+use rocket::form::Form;
+use rocket::http::ContentType;
+use rocket::response::content::RawHtml;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
-use tera::Tera;
-#[macro_use]
-extern crate lazy_static;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use tera::Tera;
+
+#[macro_use]
+extern crate rocket;
+#[macro_use]
+extern crate lazy_static;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(crate = "rocket::serde")]
-
 struct DBItem {
     image_name: String,
     image_path: PathBuf,
@@ -39,13 +42,16 @@ impl DBItem {
         tag_path.set_extension("txt");
         let image_path = Path::new("/images").join(image_path.file_name().unwrap());
         let checked_tags = Self::load_tags(tag_path.as_path());
-        // println!("{:?}: {:?}", tag_path, checked_tags);
         DBItem {
             image_name,
             image_path,
             tag_path,
             checked_tags,
         }
+    }
+    pub fn update_tags(&mut self, tags: Vec<String>) {
+        std::fs::write(&self.tag_path, tags.join("\n")).expect("Failed to write.");
+        self.checked_tags = tags;
     }
 }
 
@@ -54,25 +60,21 @@ impl DBItem {
 struct TxtDB {
     items: Vec<DBItem>,
 }
+use std::sync::{Arc, Mutex};
+type TxtDBPointer = Arc<Mutex<TxtDB>>;
 
 impl TxtDB {
-    pub fn new(img_dir: &Path, tag_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(img_dir: &Path, tag_dir: &Path) -> Result<TxtDBPointer, Box<dyn std::error::Error>> {
         let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
-        let items: Vec<_> = std::fs::read_dir(img_dir)?
+        let mut items: Vec<_> = std::fs::read_dir(img_dir)?
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
             .map(|img_path| DBItem::new(img_path.path(), tag_dir))
             .collect();
-        Ok(TxtDB { items })
+        items.sort_unstable_by(|a, b| a.image_name.cmp(&b.image_name));
+        Ok(Arc::new(Mutex::new(TxtDB { items })))
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(crate = "rocket::serde")]
-struct ToolState {
-    config: ToolConfig,
-    db: TxtDB,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,35 +106,40 @@ struct Args {
 }
 
 #[get("/")]
-fn index(state: &State<ToolState>) -> RawHtml<String> {
+fn index(config: &State<ToolConfig>) -> RawHtml<String> {
     let mut context = tera::Context::new();
-    context.insert("tags", &state.config.tags);
+    context.insert("tags", &config.tags);
     RawHtml(TEMPLATES.render("index.html", &context).unwrap())
 }
 
 #[get("/list")]
-fn list(state: &State<ToolState>) -> RawHtml<String> {
+fn list(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String> {
     let mut context = tera::Context::new();
-    context.insert("tags", &state.config.tags);
-    context.insert("multilabel", &state.config.multilabel);
-    context.insert("image_name_path_tags", &state.db.items);
+    context.insert("tags", &config.tags);
+    context.insert("multilabel", &config.multilabel);
+    let db = db.lock().unwrap();
+    context.insert("image_name_path_tags", &db.items);
     RawHtml(TEMPLATES.render("list.html", &context).unwrap())
 }
 
-// use rocket::form::Form;
-use rocket::form::{Form, Strict};
-use rocket::http::RawStr;
-#[derive(FromForm, Debug)]
-struct MyForm {
-    numbers: Vec<(String, Boolean)>,
-}
-#[put("/put", data = "<data>")]
-fn put(state: &State<ToolState>, data: Form<MyForm>) -> String {
-    println!("{:?}", data);
-    let tags = if state.config.multilabel { "" } else { "" };
+type FormTags = HashMap<String, bool>;
+#[put("/put?<name>", data = "<checked_tags>")]
+fn put(db: &State<TxtDBPointer>, checked_tags: Form<FormTags>, name: &str) -> String {
+    let mut db = db.lock().unwrap();
+    let item = db
+        .items
+        .binary_search_by_key(&name, |item| &item.image_name);
+    if let Ok(index) = item {
+        let checked_tags: Vec<String> = checked_tags
+            .iter()
+            .filter(|v| *v.1)
+            .map(|v| v.0.into())
+            .collect();
+        db.items[index].update_tags(checked_tags);
+    }
     "".into()
 }
-use rocket::http::ContentType;
+
 #[get("/static/main.js")]
 fn mainjs() -> (ContentType, &'static str) {
     let s = include_str!("../python/static/main.js");
@@ -202,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:?}", config.img_dir);
     let db = TxtDB::new(config.img_dir.as_path(), config.tag_dir.as_path())?;
     let fs = rocket::fs::FileServer::from(config.img_dir.as_path());
-    let state = ToolState { config, db };
+    //    let state = ToolState { config, db };
     if args.open {
         let url = format!("http://{}:{}", rocket_config.address, rocket_config.port);
         webbrowser::open(&url)?;
@@ -210,7 +217,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let r = rocket::custom(rocket_config)
         .mount("/", routes![index, list, put, mainjs, stylecss])
         .mount("/images", fs)
-        .manage(state);
+        .manage(config)
+        .manage(db);
     let _ = r.launch().await;
     Ok(())
 }
