@@ -8,7 +8,7 @@ use rocket::http::ContentType;
 use rocket::response::content::RawHtml;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use tera::Tera;
@@ -123,6 +123,50 @@ fn list(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String>
 }
 
 type FormTags = HashMap<String, bool>;
+type QueryTags = HashMap<String, String>;
+
+fn vec_compare(va: &[bool], vb: &[bool]) -> bool {
+    (va.len() == vb.len()) && va.iter().zip(vb).all(|(a, b)| a == b)
+}
+
+#[get("/query?<tags..>")]
+fn query(config: &State<ToolConfig>, db: &State<TxtDBPointer>, tags: QueryTags) -> RawHtml<String> {
+    let mut context = tera::Context::new();
+    context.insert("tags", &config.tags);
+    context.insert("multilabel", &config.multilabel);
+    let db = db.lock().unwrap();
+    let include_tags: HashSet<String> = tags
+        .iter()
+        .filter(|t| *t.1 == "in")
+        .map(|t| (*t.0).clone())
+        .collect();
+    let exclude_tags: HashSet<String> = tags
+        .iter()
+        .filter(|t| *t.1 == "ex")
+        .map(|t| (*t.0).clone())
+        .collect();
+    let mut queried_tags: Vec<&String> = include_tags.union(&exclude_tags).into_iter().collect();
+    queried_tags.sort();
+    let queried_tags_vector: Vec<bool> = queried_tags
+        .iter()
+        .map(|t| include_tags.contains(*t))
+        .collect();
+    let qts = &queried_tags;
+    let qtsv = &queried_tags_vector;
+    let items: Vec<&DBItem> = db
+        .items
+        .iter()
+        .filter(|i| {
+            let checked_tags: HashSet<&String> = HashSet::from_iter(i.checked_tags.iter());
+            let checked_tags_vector: Vec<bool> =
+                qts.iter().map(|t| checked_tags.contains(t)).collect();
+            vec_compare(checked_tags_vector.as_slice(), qtsv.as_slice())
+        })
+        .collect();
+    context.insert("image_name_path_tags", &items);
+    RawHtml(TEMPLATES.render("list.html", &context).unwrap())
+}
+
 #[put("/put?<name>", data = "<checked_tags>")]
 fn put(db: &State<TxtDBPointer>, checked_tags: Form<FormTags>, name: &str) -> String {
     let mut db = db.lock().unwrap();
@@ -215,7 +259,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         webbrowser::open(&url)?;
     }
     let r = rocket::custom(rocket_config)
-        .mount("/", routes![index, list, put, mainjs, stylecss])
+        .mount("/", routes![index, list, query, put, mainjs, stylecss])
         .mount("/images", fs)
         .manage(config)
         .manage(db);
