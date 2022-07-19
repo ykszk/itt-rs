@@ -167,6 +167,45 @@ fn query(config: &State<ToolConfig>, db: &State<TxtDBPointer>, tags: QueryTags) 
     RawHtml(TEMPLATES.render("list.html", &context).unwrap())
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct StatItem {
+    key: String,
+    count: usize,
+    url: String,
+}
+
+static DELIM: &str = " & ";
+
+#[get("/stats")]
+fn stats(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let db = db.lock().unwrap();
+    db.items.iter().for_each(|item| {
+        let key = item.checked_tags.join(DELIM);
+        *counts.entry(key).or_insert(0) += 1;
+    });
+    println!("{:?}", counts);
+    let all_tags: HashSet<&str> = HashSet::from_iter(config.tags.iter().map(|t| t.as_str()));
+    let mut v_stats: Vec<StatItem> = counts
+        .into_iter()
+        .map(|(key, count)| {
+            let queries: Vec<&str> = key.split(DELIM).collect();
+            let mut params: Vec<String> = queries.iter().map(|q| format!("{}=in", q)).collect();
+            let query_set = HashSet::from_iter(queries);
+            let ex_tags = all_tags.difference(&query_set).copied();
+            let exs: Vec<String> = ex_tags.map(|t| format!("{}=ex", t)).collect();
+            params.extend(exs);
+            let url = format!("/query?{}", params.join("&"));
+            StatItem { key, count, url }
+        })
+        .collect();
+    v_stats.sort_by(|a, b| a.key.cmp(&b.key));
+    let mut context = tera::Context::new();
+    context.insert("stats", &v_stats);
+    RawHtml(TEMPLATES.render("stats.html", &context).unwrap())
+}
+
 #[put("/put?<name>", data = "<checked_tags>")]
 fn put(db: &State<TxtDBPointer>, checked_tags: Form<FormTags>, name: &str) -> String {
     let mut db = db.lock().unwrap();
@@ -259,7 +298,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         webbrowser::open(&url)?;
     }
     let r = rocket::custom(rocket_config)
-        .mount("/", routes![index, list, query, put, mainjs, stylecss])
+        .mount(
+            "/",
+            routes![index, list, query, put, stats, mainjs, stylecss],
+        )
         .mount("/images", fs)
         .manage(config)
         .manage(db);
