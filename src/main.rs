@@ -36,12 +36,33 @@ impl DBItem {
             Vec::new()
         }
     }
+
+    fn load_json(tag_path: &Path) -> Vec<String> {
+        let lm_data = labelme_rs::LabelMeData::load(tag_path).unwrap();
+        lm_data
+            .flags
+            .into_iter()
+            .filter(|(_, flag)| *flag)
+            .map(|(label, _)| label)
+            .collect()
+    }
+
     pub fn new(image_path: PathBuf, tag_dir: &Path) -> Self {
         let image_name = image_path.to_str().unwrap().into();
         let mut tag_path = tag_dir.join(image_path.file_name().unwrap());
         tag_path.set_extension("txt");
         let image_path = Path::new("/images").join(image_path.file_name().unwrap());
-        let checked_tags = Self::load_tags(tag_path.as_path());
+        let checked_tags = if tag_path.exists() {
+            Self::load_tags(&tag_path)
+        } else {
+            tag_path.set_extension("json");
+            if tag_path.exists() {
+                Self::load_json(&tag_path)
+            } else {
+                tag_path.set_extension("txt");
+                Vec::new()
+            }
+        };
         DBItem {
             image_name,
             image_path,
@@ -50,7 +71,17 @@ impl DBItem {
         }
     }
     pub fn update_tags(&mut self, tags: Vec<String>) {
-        std::fs::write(&self.tag_path, tags.join("\n")).expect("Failed to write.");
+        if self.tag_path.extension().unwrap() == ".txt" {
+            std::fs::write(&self.tag_path, tags.join("\n")).expect("Failed to write.");
+        } else {
+            println!("{:?}", self.tag_path);
+            let mut lm_data = labelme_rs::LabelMeData::load(&self.tag_path).unwrap();
+            lm_data
+                .flags
+                .iter_mut()
+                .for_each(|(label, flag)| *flag = tags.contains(label));
+            lm_data.save(&self.tag_path).unwrap();
+        }
         self.checked_tags = tags;
     }
 }
@@ -190,7 +221,11 @@ fn stats(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String
     let mut v_stats: Vec<StatItem> = counts
         .into_iter()
         .map(|(key, count)| {
-            let queries: Vec<&str> = key.split(DELIM).collect();
+            let queries: Vec<&str> = if key.is_empty() {
+                Vec::new()
+            } else {
+                key.split(DELIM).collect()
+            };
             let mut params: Vec<String> = queries.iter().map(|q| format!("{}=in", q)).collect();
             let query_set = HashSet::from_iter(queries);
             let ex_tags = all_tags.difference(&query_set).copied();
