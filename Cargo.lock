@@ -912,7 +912,8 @@ dependencies = [
 
 [[package]]
 name = "labelme-rs"
-version = "0.1.0"
+version = "0.3.0"
+source = "git+https://github.com/ykszk/labelme-rs#5ccf672988390d4a30779627106a03821b02baba"
 dependencies = [
  "base64",
  "image",
