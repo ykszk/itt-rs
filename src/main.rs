@@ -296,7 +296,13 @@ lazy_static! {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut rocket_config = rocket::Config::default();
-    let config: ToolConfig = Figment::new().merge(Toml::file(&args.config)).extract()?;
+    let mut config: ToolConfig = Figment::new().merge(Toml::file(&args.config)).extract()?;
+    if config.img_dir.is_relative() {
+        config.img_dir = args.config.parent().unwrap().join(config.img_dir);
+    }
+    if config.tag_dir.is_relative() {
+        config.tag_dir = args.config.parent().unwrap().join(config.tag_dir);
+    }
     rocket_config.port = config.server.port;
     let ip_addr = match config.server.host.as_str() {
         "localhost" => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -321,13 +327,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ])?;
     }
 
-    // if config.img_dir.is_relative() {
-    //     config.img_dir = args.config.parent().unwrap().join(config.img_dir.as_path());
-    // };
-    println!("{:?}", config.img_dir);
     let db = TxtDB::new(config.img_dir.as_path(), config.tag_dir.as_path())?;
     let fs = rocket::fs::FileServer::from(config.img_dir.as_path());
-    //    let state = ToolState { config, db };
+
     if args.open {
         let url = format!("http://{}:{}", rocket_config.address, rocket_config.port);
         webbrowser::open(&url)?;
