@@ -95,7 +95,11 @@ use std::sync::{Arc, Mutex};
 type TxtDBPointer = Arc<Mutex<TxtDB>>;
 
 impl TxtDB {
-    pub fn new(img_dir: &Path, tag_dir: &Path) -> Result<TxtDBPointer, Box<dyn std::error::Error>> {
+    pub fn new(
+        img_dir: &Path,
+        tag_dir: &Path,
+        skip_missing: bool,
+    ) -> Result<TxtDBPointer, Box<dyn std::error::Error>> {
         let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
         let mut items: Vec<_> = std::fs::read_dir(img_dir)?
             .into_iter()
@@ -103,6 +107,12 @@ impl TxtDB {
             .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
             .map(|img_path| DBItem::new(img_path.path(), tag_dir))
             .collect();
+        if skip_missing {
+            items = items
+                .into_iter()
+                .filter(|item| item.tag_path.exists())
+                .collect();
+        }
         items.sort_unstable_by(|a, b| a.image_name.cmp(&b.image_name));
         Ok(Arc::new(Mutex::new(TxtDB { items })))
     }
@@ -131,6 +141,9 @@ struct ToolConfigServer {
 struct Args {
     /// Config toml file path
     config: PathBuf,
+    /// Ignore images with missing tag file
+    #[clap(short, long)]
+    ignore_missing: bool,
     /// Open web browser
     #[clap(short, long)]
     open: bool,
@@ -327,7 +340,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ])?;
     }
 
-    let db = TxtDB::new(config.img_dir.as_path(), config.tag_dir.as_path())?;
+    let db = TxtDB::new(
+        config.img_dir.as_path(),
+        config.tag_dir.as_path(),
+        args.ignore_missing,
+    )?;
     let fs = rocket::fs::FileServer::from(config.img_dir.as_path());
 
     if args.open {
