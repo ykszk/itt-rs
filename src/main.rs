@@ -48,7 +48,7 @@ impl DBItem {
     }
 
     pub fn new(image_path: PathBuf, tag_dir: &Path) -> Self {
-        let image_name = image_path.to_str().unwrap().into();
+        let image_name = image_path.file_name().unwrap().to_str().unwrap().into();
         let mut tag_path = tag_dir.join(image_path.file_name().unwrap());
         tag_path.set_extension("txt");
         let image_path = Path::new("/images").join(image_path.file_name().unwrap());
