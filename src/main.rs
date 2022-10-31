@@ -8,6 +8,7 @@ use rocket::http::ContentType;
 use rocket::response::content::RawHtml;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
+use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -27,7 +28,72 @@ struct DBItem {
     checked_tags: Vec<String>,
 }
 
-impl DBItem {
+trait Dbms {
+    fn create_database(
+        img_dir: &Path,
+        tag_dir: &Path,
+        skip_missing: bool,
+    ) -> Result<DataBase, Box<dyn std::error::Error>>
+    where
+        Self: Sized;
+    fn update_tags(&self, item: &mut DBItem, tags: Vec<String>);
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct DataBase {
+    items: Vec<DBItem>,
+}
+use std::sync::{Arc, Mutex};
+type DataBasePointer = Arc<Mutex<DataBase>>;
+type DbmsBox = Box<dyn Dbms + Send>;
+type DbmsPointer = Arc<Mutex<DbmsBox>>;
+
+struct TxtDB {}
+
+impl Dbms for TxtDB {
+    fn create_database(
+        img_dir: &Path,
+        tag_dir: &Path,
+        skip_missing: bool,
+    ) -> Result<DataBase, Box<dyn std::error::Error>> {
+        let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
+        let mut items: Vec<_> = std::fs::read_dir(img_dir)?
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
+            .map(|img_path| Self::new_item(img_path.path(), tag_dir))
+            .collect();
+        if skip_missing {
+            items = items
+                .into_iter()
+                .filter(|item| item.tag_path.exists())
+                .collect();
+        }
+        items.sort_unstable_by(|a, b| a.image_name.cmp(&b.image_name));
+        Ok(DataBase { items })
+    }
+
+    fn update_tags(&self, item: &mut DBItem, tags: Vec<String>) {
+        if item.tag_path.extension().unwrap() == "txt" {
+            std::fs::write(&item.tag_path, tags.join("\n")).expect("Failed to write.");
+        } else {
+            println!("{:?}", item.tag_path);
+            let mut lm_data = labelme_rs::LabelMeData::load(&item.tag_path).unwrap();
+            lm_data
+                .flags
+                .iter_mut()
+                .for_each(|(label, flag)| *flag = tags.contains(label));
+            lm_data.save(&item.tag_path).unwrap();
+        }
+        item.checked_tags = tags;
+    }
+}
+
+impl TxtDB {
+    fn new() -> Self {
+        TxtDB {}
+    }
     fn load_tags(tag_path: &Path) -> Vec<String> {
         let contents = std::fs::read_to_string(tag_path);
         if let Ok(contents) = contents {
@@ -47,7 +113,7 @@ impl DBItem {
             .collect()
     }
 
-    pub fn new(image_path: PathBuf, tag_dir: &Path) -> Self {
+    pub fn new_item(image_path: PathBuf, tag_dir: &Path) -> DBItem {
         let image_name = image_path.file_name().unwrap().to_str().unwrap().into();
         let mut tag_path = tag_dir.join(image_path.file_name().unwrap());
         tag_path.set_extension("txt");
@@ -70,51 +136,83 @@ impl DBItem {
             checked_tags,
         }
     }
-    pub fn update_tags(&mut self, tags: Vec<String>) {
-        if self.tag_path.extension().unwrap() == ".txt" {
-            std::fs::write(&self.tag_path, tags.join("\n")).expect("Failed to write.");
-        } else {
-            println!("{:?}", self.tag_path);
-            let mut lm_data = labelme_rs::LabelMeData::load(&self.tag_path).unwrap();
-            lm_data
-                .flags
-                .iter_mut()
-                .for_each(|(label, flag)| *flag = tags.contains(label));
-            lm_data.save(&self.tag_path).unwrap();
+}
+
+struct SqliteDB {
+    db_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct Record {
+    key: String,
+    data: String,
+}
+
+impl From<Record> for DBItem {
+    fn from(record: Record) -> DBItem {
+        let image_path = Path::new("/images").join(&record.key);
+        let tag_path = PathBuf::new();
+        let checked_tags = record.data.split(',').map(|e| e.into()).collect();
+        DBItem {
+            image_name: record.key,
+            image_path,
+            tag_path,
+            checked_tags,
         }
-        self.checked_tags = tags;
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(crate = "rocket::serde")]
-struct TxtDB {
-    items: Vec<DBItem>,
+impl SqliteDB {
+    pub fn new_item(conn: &Connection, image_path: PathBuf) -> DBItem {
+        let item = conn.query_row(
+            "SELECT * FROM records where key=?",
+            [image_path.file_name().unwrap().to_str().unwrap()],
+            |row| {
+                Ok(Record {
+                    key: row.get(0)?,
+                    data: row.get(1)?,
+                }
+                .into())
+            },
+        );
+        item.unwrap_or_else(|_| {
+            Record {
+                key: image_path.file_name().unwrap().to_str().unwrap().into(),
+                data: "".into(),
+            }
+            .into()
+        })
+    }
 }
-use std::sync::{Arc, Mutex};
-type TxtDBPointer = Arc<Mutex<TxtDB>>;
 
-impl TxtDB {
-    pub fn new(
+impl Dbms for SqliteDB {
+    fn create_database(
         img_dir: &Path,
         tag_dir: &Path,
-        skip_missing: bool,
-    ) -> Result<TxtDBPointer, Box<dyn std::error::Error>> {
+        _skip_missing: bool,
+    ) -> Result<DataBase, Box<dyn std::error::Error>> {
+        let conn = Connection::open(tag_dir)?;
+
         let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
         let mut items: Vec<_> = std::fs::read_dir(img_dir)?
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
-            .map(|img_path| DBItem::new(img_path.path(), tag_dir))
+            .map(|img_path| Self::new_item(&conn, img_path.path()))
             .collect();
-        if skip_missing {
-            items = items
-                .into_iter()
-                .filter(|item| item.tag_path.exists())
-                .collect();
-        }
         items.sort_unstable_by(|a, b| a.image_name.cmp(&b.image_name));
-        Ok(Arc::new(Mutex::new(TxtDB { items })))
+        Ok(DataBase { items })
+    }
+
+    fn update_tags(&self, item: &mut DBItem, tags: Vec<String>) {
+        let data = tags.join(",");
+        let conn = Connection::open(&self.db_path).unwrap();
+        let result = conn.execute(
+            "update records set data=? where key=?",
+            [data, item.image_name.clone()],
+        );
+        result.unwrap();
+        item.checked_tags = tags;
     }
 }
 
@@ -157,7 +255,7 @@ fn index(config: &State<ToolConfig>) -> RawHtml<String> {
 }
 
 #[get("/list")]
-fn list(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String> {
+fn list(config: &State<ToolConfig>, db: &State<DataBasePointer>) -> RawHtml<String> {
     let mut context = tera::Context::new();
     context.insert("tags", &config.tags);
     context.insert("multilabel", &config.multilabel);
@@ -174,7 +272,11 @@ fn vec_compare(va: &[bool], vb: &[bool]) -> bool {
 }
 
 #[get("/query?<tags..>")]
-fn query(config: &State<ToolConfig>, db: &State<TxtDBPointer>, tags: QueryTags) -> RawHtml<String> {
+fn query(
+    config: &State<ToolConfig>,
+    db: &State<DataBasePointer>,
+    tags: QueryTags,
+) -> RawHtml<String> {
     let mut context = tera::Context::new();
     context.insert("tags", &config.tags);
     context.insert("multilabel", &config.multilabel);
@@ -222,7 +324,7 @@ struct StatItem {
 static DELIM: &str = " & ";
 
 #[get("/stats")]
-fn stats(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String> {
+fn stats(config: &State<ToolConfig>, db: &State<DataBasePointer>) -> RawHtml<String> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     let db = db.lock().unwrap();
     db.items.iter().for_each(|item| {
@@ -255,7 +357,12 @@ fn stats(config: &State<ToolConfig>, db: &State<TxtDBPointer>) -> RawHtml<String
 }
 
 #[put("/put?<name>", data = "<checked_tags>")]
-fn put(db: &State<TxtDBPointer>, checked_tags: Form<FormTags>, name: &str) -> String {
+fn put(
+    db: &State<DataBasePointer>,
+    dbms: &State<DbmsPointer>,
+    checked_tags: Form<FormTags>,
+    name: &str,
+) -> String {
     let mut db = db.lock().unwrap();
     let item = db
         .items
@@ -266,7 +373,9 @@ fn put(db: &State<TxtDBPointer>, checked_tags: Form<FormTags>, name: &str) -> St
             .filter(|v| *v.1)
             .map(|v| v.0.into())
             .collect();
-        db.items[index].update_tags(checked_tags);
+        dbms.lock()
+            .unwrap()
+            .update_tags(&mut db.items[index], checked_tags);
     }
     "".into()
 }
@@ -339,12 +448,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("stats.html", include_str!("../python/templates/stats.html")),
         ])?;
     }
+    println!("{:?}", config.tag_dir);
 
-    let db = TxtDB::new(
-        config.img_dir.as_path(),
-        config.tag_dir.as_path(),
-        args.ignore_missing,
-    )?;
+    let (db, dbms) = if config.tag_dir.extension().unwrap_or_default() == "sqlite3" {
+        println!("load tags from sqlite db");
+        (
+            SqliteDB::create_database(
+                config.img_dir.as_path(),
+                config.tag_dir.as_path(),
+                args.ignore_missing,
+            )?,
+            Box::new(SqliteDB {
+                db_path: config.tag_dir.clone(),
+            }) as DbmsBox,
+        )
+    } else {
+        println!("load tags from text(json) files");
+        (
+            TxtDB::create_database(
+                config.img_dir.as_path(),
+                config.tag_dir.as_path(),
+                args.ignore_missing,
+            )?,
+            Box::new(TxtDB::new()) as DbmsBox,
+        )
+    };
+    let db = Arc::new(Mutex::new(db));
+    let dbms: DbmsPointer = Arc::new(Mutex::new(dbms));
     let fs = rocket::fs::FileServer::from(config.img_dir.as_path());
 
     if args.open {
@@ -358,7 +488,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .mount("/images", fs)
         .manage(config)
-        .manage(db);
+        .manage(db)
+        .manage(dbms);
     let _ = r.launch().await;
     Ok(())
 }
