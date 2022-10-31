@@ -1,7 +1,13 @@
 [package]
 name = "image_tagging"
-version = "0.1.0"
+version = "0.1.2"
+authors = ["Yuki Suzuki <y-suzuki@radiol.med.osaka-u.ac.jp>"]
 edition = "2021"
+repository = "https://github.com/ykszk/itt-rs"
+description = """
+Simple image tagging tool with web interface.
+Ported to rust from original image_tagging_tool (https://github.com/ykszk/image_tagging_tool) implemented in python.
+"""
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
