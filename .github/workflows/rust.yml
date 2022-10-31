@@ -1,0 +1,38 @@
+name: Rust
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    - name: Build
+      run: cargo build --release --verbose
+    - name: Run tests
+      run: cargo test --release --verbose
+
+    - name: Package for windows
+      id: create_package
+      run: |
+        powershell Compress-Archive -Path target/release/image_tagging.exe -DestinationPath image_tagging.zip
+        
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ github.ref_name }}
+        body: ${{ github.event.head_commit.message }}
+        draft: false
+        prerelease: false
+        files: |
+          image_tagging.zip
