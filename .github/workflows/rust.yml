@@ -18,14 +18,14 @@ jobs:
       with:
         submodules: recursive
     - name: Build
-      run: cargo build --release --verbose
+      run: cargo build --release
     - name: Run tests
-      run: cargo test --release --verbose
+      run: cargo test --release
 
     - name: Package for windows
       id: create_package
       run: |
-        powershell Compress-Archive -Path target/release/image_tagging.exe -DestinationPath image_tagging.zip
+        powershell Compress-Archive -Path target/release/image_tagging.exe -DestinationPath image_tagging-${{github.ref_name}}.zip
         
     - name: Release
       uses: softprops/action-gh-release@v1
@@ -35,4 +35,4 @@ jobs:
         draft: false
         prerelease: false
         files: |
-          image_tagging.zip
+          image_tagging-${{github.ref_name}}.zip
