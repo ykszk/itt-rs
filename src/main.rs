@@ -357,7 +357,7 @@ fn stats(config: &State<ToolConfig>, db: &State<DataBasePointer>) -> RawHtml<Str
 }
 
 #[put("/put?<name>", data = "<checked_tags>")]
-fn put(
+fn put_multi(
     db: &State<DataBasePointer>,
     dbms: &State<DbmsPointer>,
     checked_tags: Form<FormTags>,
@@ -373,6 +373,26 @@ fn put(
             .filter(|v| *v.1)
             .map(|v| v.0.into())
             .collect();
+        dbms.lock()
+            .unwrap()
+            .update_tags(&mut db.items[index], checked_tags);
+    }
+    "".into()
+}
+
+#[put("/put?<name>", data = "<checked_tags>")]
+fn put_single(
+    db: &State<DataBasePointer>,
+    dbms: &State<DbmsPointer>,
+    checked_tags: Form<String>,
+    name: &str,
+) -> String {
+    let mut db = db.lock().unwrap();
+    let item = db
+        .items
+        .binary_search_by_key(&name, |item| &item.image_name);
+    if let Ok(index) = item {
+        let checked_tags: Vec<String> = vec![checked_tags.into_inner()];
         dbms.lock()
             .unwrap()
             .update_tags(&mut db.items[index], checked_tags);
@@ -481,11 +501,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let url = format!("http://{}:{}", rocket_config.address, rocket_config.port);
         webbrowser::open(&url)?;
     }
+    let routes = if config.multilabel {
+        routes![index, list, query, put_multi, stats, mainjs, stylecss]
+    } else {
+        routes![index, list, query, put_single, stats, mainjs, stylecss]
+    };
     let r = rocket::custom(rocket_config)
-        .mount(
-            "/",
-            routes![index, list, query, put, stats, mainjs, stylecss],
-        )
+        .mount("/", routes)
         .mount("/images", fs)
         .manage(config)
         .manage(db)
