@@ -1,6 +1,6 @@
 [package]
 name = "image_tagging"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Yuki Suzuki <y-suzuki@radiol.med.osaka-u.ac.jp>"]
 edition = "2021"
 repository = "https://github.com/ykszk/itt-rs"

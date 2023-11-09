@@ -59,16 +59,12 @@ impl Dbms for TxtDB {
     ) -> Result<DataBase, Box<dyn std::error::Error>> {
         let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
         let mut items: Vec<_> = std::fs::read_dir(img_dir)?
-            .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
             .map(|img_path| Self::new_item(img_path.path(), tag_dir))
             .collect();
         if skip_missing {
-            items = items
-                .into_iter()
-                .filter(|item| item.tag_path.exists())
-                .collect();
+            items.retain(|item| item.tag_path.exists());
         }
         items.sort_unstable_by(|a, b| a.image_name.cmp(&b.image_name));
         Ok(DataBase { items })
@@ -79,12 +75,13 @@ impl Dbms for TxtDB {
             std::fs::write(&item.tag_path, tags.join("\n")).expect("Failed to write.");
         } else {
             println!("{:?}", item.tag_path);
-            let mut lm_data = labelme_rs::LabelMeData::load(&item.tag_path).unwrap();
+            let mut lm_data = labelme_rs::LabelMeData::try_from(item.tag_path.as_path()).unwrap();
             lm_data
                 .flags
                 .iter_mut()
                 .for_each(|(label, flag)| *flag = tags.contains(label));
-            lm_data.save(&item.tag_path).unwrap();
+            let writer = std::io::BufWriter::new(std::fs::File::create(&item.tag_path).unwrap());
+            labelme_rs::serde_json::to_writer_pretty(writer, &lm_data).unwrap();
         }
         item.checked_tags = tags;
     }
@@ -104,7 +101,7 @@ impl TxtDB {
     }
 
     fn load_json(tag_path: &Path) -> Vec<String> {
-        let lm_data = labelme_rs::LabelMeData::load(tag_path).unwrap();
+        let lm_data = labelme_rs::LabelMeData::try_from(tag_path).unwrap();
         lm_data
             .flags
             .into_iter()
@@ -195,7 +192,6 @@ impl Dbms for SqliteDB {
 
         let re = regex::Regex::new(r"^.+\.jpg|png|jpeg$").unwrap();
         let mut items: Vec<_> = std::fs::read_dir(img_dir)?
-            .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|path| re.is_match(path.file_name().to_str().unwrap()))
             .map(|img_path| Self::new_item(&conn, img_path.path()))
@@ -291,7 +287,7 @@ fn query(
         .filter(|t| *t.1 == "ex")
         .map(|t| (*t.0).clone())
         .collect();
-    let mut queried_tags: Vec<&String> = include_tags.union(&exclude_tags).into_iter().collect();
+    let mut queried_tags: Vec<&String> = include_tags.union(&exclude_tags).collect();
     queried_tags.sort();
     let queried_tags_vector: Vec<bool> = queried_tags
         .iter()
@@ -447,12 +443,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     rocket_config.port = config.server.port;
     let ip_addr = match config.server.host.as_str() {
-        "localhost" => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
         octets => octets.parse()?,
     };
     rocket_config.address = ip_addr;
     {
-        let mut tera = tera::Tera::new("/dev/null/*").unwrap();
+        let mut tera = tera::Tera::default();
         tera.autoescape_on(vec![]);
         tera.add_raw_templates(vec![
             (
@@ -471,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:?}", config.tag_dir);
 
     let (db, dbms) = if config.tag_dir.extension().unwrap_or_default() == "sqlite3" {
-        println!("load tags from sqlite db");
+        println!("load tags from sqlite db: {:?}", &config.tag_dir);
         (
             SqliteDB::create_database(
                 config.img_dir.as_path(),
@@ -483,7 +479,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) as DbmsBox,
         )
     } else {
-        println!("load tags from text(json) files");
+        println!("load tags from text(json) files: {:?}", &config.tag_dir);
         (
             TxtDB::create_database(
                 config.img_dir.as_path(),
@@ -497,9 +493,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dbms: DbmsPointer = Arc::new(Mutex::new(dbms));
     let fs = rocket::fs::FileServer::from(config.img_dir.as_path());
 
+    let url = format!("http://{}:{}", rocket_config.address, rocket_config.port);
     if args.open {
-        let url = format!("http://{}:{}", rocket_config.address, rocket_config.port);
         webbrowser::open(&url)?;
+    } else {
+        println!("Open {}", url);
     }
     let routes = if config.multilabel {
         routes![index, list, query, put_multi, stats, mainjs, stylecss]
